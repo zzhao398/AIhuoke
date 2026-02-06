@@ -1,0 +1,30 @@
+{
+  "name": "whatsapp-lead-qualifier",
+  "version": "0.1.0",
+  "description": "WhatsApp chatbot for B2B vehicle export lead qualification",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "nodemon src/server.js",
+    "start": "node src/server.js",
+    "test:config": "node test-config.js"
+  },
+  "keywords": [
+    "whatsapp",
+    "chatbot",
+    "lead-qualification",
+    "claude",
+    "b2b"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.1",
+    "body-parser": "^1.20.3",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9"
+  }
+}
