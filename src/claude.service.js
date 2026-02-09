@@ -31,14 +31,28 @@ Conversation flow:
 3. Then ask about their company name
 4. Then identify buyer type if not already clear
 
-Extract fields from user messages as they naturally provide information. Don't ask for information they've already given.`;
+Extract fields from user messages as they naturally provide information. Don't ask for information they've already given.
+
+IMPORTANT: You must respond ONLY with valid JSON in this exact format:
+{
+  "extracted_fields": {
+    "destination_country": "string or empty",
+    "destination_port": "string or empty",
+    "qty_bucket": "1-5 or 6-20 or 20+ or empty",
+    "company_name": "string or empty",
+    "buyer_type": "dealer or trader or fleet or project or empty"
+  },
+  "next_message": "your response to the user (max 500 characters)"
+}`;
 
 const JSON_SCHEMA = {
   type: 'object',
   required: ['extracted_fields', 'next_message'],
+  additionalProperties: false,
   properties: {
     extracted_fields: {
       type: 'object',
+      additionalProperties: false,
       properties: {
         destination_country: {
           type: 'string',
@@ -66,7 +80,6 @@ const JSON_SCHEMA = {
     },
     next_message: {
       type: 'string',
-      maxLength: 500,
       description: 'The next question or response to send to the user',
     },
   },
@@ -96,11 +109,9 @@ export async function getResponse(conversationHistory, userMessage) {
       max_tokens: 1024,
       system: SYSTEM_PROMPT,
       messages: messages,
-      response_format: {
-        type: 'json_schema',
-        json_schema: {
-          name: 'lead_qualification_response',
-          strict: true,
+      output_config: {
+        format: {
+          type: 'json_schema',
           schema: JSON_SCHEMA,
         },
       },
