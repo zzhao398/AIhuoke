@@ -37,4 +37,10 @@ export const config = {
     port: process.env.PORT || 3000,
     nodeEnv: process.env.NODE_ENV || 'development',
   },
+
+  // n8n Webhooks (optional)
+  n8n: {
+    webhookHumanNow: process.env.N8N_WEBHOOK_HUMAN_NOW || '',
+    webhookNurture: process.env.N8N_WEBHOOK_NURTURE || '',
+  },
 };
