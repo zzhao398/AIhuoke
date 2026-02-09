@@ -103,14 +103,8 @@ export function shouldAdvanceStage(session) {
  * Count how many conversation turns have happened in the current stage
  */
 function countTurnsInStage(session, stage) {
-  // Simple approximation: count assistant messages
-  // In a more sophisticated version, track stage changes in session
-  if (!session.messages || session.messages.length === 0) {
-    return 0;
-  }
-
-  // Count assistant messages (each represents one turn)
-  return session.messages.filter(m => m.role === 'assistant').length;
+  // Use the session's stage turn counter
+  return session.stage_turn_count || 0;
 }
 
 /**

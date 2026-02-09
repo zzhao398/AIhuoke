@@ -24,6 +24,7 @@ function getSession(waId) {
       wa_id: waId,
       messages: [],
       stage: 'GREET',
+      stage_turn_count: 0,
       score: 0,
       score_history: [],
       risk_flags: [],
@@ -62,9 +63,12 @@ function updateSession(waId, userMessage, claudeResponse) {
     session.messages = session.messages.slice(-10);
   }
 
-  // Update stage
-  if (claudeResponse.stage) {
-    session.stage = claudeResponse.stage;
+  // Increment turn count for current stage
+  session.stage_turn_count = (session.stage_turn_count || 0) + 1;
+
+  // Log Claude's stage suggestion (informational only - state machine controls actual stage)
+  if (claudeResponse.stage && claudeResponse.stage !== session.stage) {
+    console.log(`ℹ️  Claude suggested stage: ${claudeResponse.stage} (current: ${session.stage})`);
   }
 
   // Update score
@@ -171,6 +175,7 @@ app.post('/webhook', async (req, res) => {
     if (advancement.shouldAdvance && advancement.nextStage) {
       console.log(`📈 Stage advancing: ${session.stage} → ${advancement.nextStage} (${advancement.reason})`);
       session.stage = advancement.nextStage;
+      session.stage_turn_count = 0; // Reset turn counter for new stage
     }
 
     // Log scoring and stage info
