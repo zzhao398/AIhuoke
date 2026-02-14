@@ -24,6 +24,11 @@ export const config = {
     model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-5-20250929',
   },
 
+  // OpenAI Whisper
+  openai: {
+    apiKey: process.env.OPENAI_API_KEY,
+  },
+
   // WhatsApp Cloud API
   whatsapp: {
     token: process.env.WA_TOKEN,

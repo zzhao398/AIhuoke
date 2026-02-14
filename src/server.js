@@ -3,6 +3,7 @@ import bodyParser from 'body-parser';
 import { config } from './config.js';
 import { getResponse } from './claude.service.js';
 import { sendMessage, markAsRead } from './whatsapp.service.js';
+import { transcribeWhatsAppAudio } from './whisper.service.js';
 import { shouldAdvanceStage, getStageGuidance, isStageComplete } from './state-machine.js';
 import { getScoreBreakdown, determineRoute } from './lead-scorer.js';
 import { executeRouting } from './routing.service.js';
@@ -145,14 +146,30 @@ app.post('/webhook', async (req, res) => {
 
     console.log(`\n--- Incoming message from ${waId} ---`);
 
-    // Only handle text messages for now
-    if (messageType !== 'text') {
+    // Handle text and audio (voice) messages
+    let userMessage;
+
+    if (messageType === 'text') {
+      userMessage = message.text.body;
+    } else if (messageType === 'audio') {
+      const mediaId = message.audio.id;
+      console.log(`Voice message received, transcribing: ${mediaId}`);
+      try {
+        userMessage = await transcribeWhatsAppAudio(mediaId);
+        if (!userMessage) {
+          await sendMessage(waId, "Sorry, I couldn't understand the voice message. Could you please type your message?");
+          return;
+        }
+      } catch (err) {
+        console.error('Transcription error:', err);
+        await sendMessage(waId, "Sorry, I had trouble processing the voice message. Could you please type your message?");
+        return;
+      }
+    } else {
       console.log(`Unsupported message type: ${messageType}`);
-      await sendMessage(waId, "I can only process text messages at the moment. Please send your message as text.");
+      await sendMessage(waId, "I can only process text and voice messages.");
       return;
     }
-
-    const userMessage = message.text.body;
     console.log(`User: ${userMessage}`);
 
     // Mark message as read
