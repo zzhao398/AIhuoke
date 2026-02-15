@@ -3,6 +3,10 @@ import bodyParser from 'body-parser';
 import { config } from './config.js';
 import { getResponse } from './claude.service.js';
 import { sendMessage, markAsRead } from './whatsapp.service.js';
+import { transcribeWhatsAppAudio } from './whisper.service.js';
+import { shouldAdvanceStage, getStageGuidance, isStageComplete } from './state-machine.js';
+import { getScoreBreakdown, determineRoute } from './lead-scorer.js';
+import { executeRouting } from './routing.service.js';
 
 const app = express();
 app.use(bodyParser.json());
@@ -20,12 +24,20 @@ function getSession(waId) {
     sessions.set(waId, {
       wa_id: waId,
       messages: [],
+      stage: 'GREET',
+      stage_turn_count: 0,
+      score: 0,
+      score_history: [],
+      risk_flags: [],
       lead_data: {
         destination_country: '',
         destination_port: '',
         qty_bucket: '',
         company_name: '',
         buyer_type: '',
+        contact_method: '',
+        timeline: '',
+        budget_indication: '',
       },
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -36,15 +48,15 @@ function getSession(waId) {
 }
 
 /**
- * Update session with new message and extracted fields
+ * Update session with new message and Claude response
  */
-function updateSession(waId, userMessage, assistantMessage, extractedFields) {
+function updateSession(waId, userMessage, claudeResponse) {
   const session = getSession(waId);
 
   // Add messages to history
   session.messages.push(
     { role: 'user', content: userMessage },
-    { role: 'assistant', content: assistantMessage }
+    { role: 'assistant', content: claudeResponse.next_message }
   );
 
   // Keep only last 10 messages to control context size
@@ -52,9 +64,32 @@ function updateSession(waId, userMessage, assistantMessage, extractedFields) {
     session.messages = session.messages.slice(-10);
   }
 
+  // Increment turn count for current stage
+  session.stage_turn_count = (session.stage_turn_count || 0) + 1;
+
+  // Log Claude's stage suggestion (informational only - state machine controls actual stage)
+  if (claudeResponse.stage && claudeResponse.stage !== session.stage) {
+    console.log(`ℹ️  Claude suggested stage: ${claudeResponse.stage} (current: ${session.stage})`);
+  }
+
+  // Update score
+  if (claudeResponse.score_delta !== undefined) {
+    session.score += claudeResponse.score_delta;
+    session.score_history.push({
+      delta: claudeResponse.score_delta,
+      reasons: claudeResponse.reasons || [],
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  // Update risk flags
+  if (claudeResponse.risk_flags && claudeResponse.risk_flags.length > 0) {
+    session.risk_flags = [...new Set([...session.risk_flags, ...claudeResponse.risk_flags])];
+  }
+
   // Update lead_data with any newly extracted fields
-  for (const [key, value] of Object.entries(extractedFields)) {
-    if (value && value.trim() !== '') {
+  for (const [key, value] of Object.entries(claudeResponse.extracted_fields || {})) {
+    if (value && typeof value === 'string' && value.trim() !== '') {
       session.lead_data[key] = value;
     }
   }
@@ -111,14 +146,30 @@ app.post('/webhook', async (req, res) => {
 
     console.log(`\n--- Incoming message from ${waId} ---`);
 
-    // Only handle text messages for now
-    if (messageType !== 'text') {
+    // Handle text and audio (voice) messages
+    let userMessage;
+
+    if (messageType === 'text') {
+      userMessage = message.text.body;
+    } else if (messageType === 'audio') {
+      const mediaId = message.audio.id;
+      console.log(`Voice message received, transcribing: ${mediaId}`);
+      try {
+        userMessage = await transcribeWhatsAppAudio(mediaId);
+        if (!userMessage) {
+          await sendMessage(waId, "Sorry, I couldn't understand the voice message. Could you please type your message?");
+          return;
+        }
+      } catch (err) {
+        console.error('Transcription error:', err);
+        await sendMessage(waId, "Sorry, I had trouble processing the voice message. Could you please type your message?");
+        return;
+      }
+    } else {
       console.log(`Unsupported message type: ${messageType}`);
-      await sendMessage(waId, "I can only process text messages at the moment. Please send your message as text.");
+      await sendMessage(waId, "I can only process text and voice messages.");
       return;
     }
-
-    const userMessage = message.text.body;
     console.log(`User: ${userMessage}`);
 
     // Mark message as read
@@ -127,18 +178,53 @@ app.post('/webhook', async (req, res) => {
     // Get or create session
     const session = getSession(waId);
 
-    // Call Claude API
-    const claudeResponse = await getResponse(session.messages, userMessage);
+    // Get stage guidance for Claude
+    const stageInfo = getStageGuidance(session.stage, session.lead_data);
 
-    // Extract fields and next message
-    const { extracted_fields, next_message } = claudeResponse;
+    // Call Claude API with stage context
+    const claudeResponse = await getResponse(session.messages, userMessage, stageInfo, session.score);
 
-    // Update session
-    updateSession(waId, userMessage, next_message, extracted_fields);
+    // Update session with Claude's response
+    updateSession(waId, userMessage, claudeResponse);
 
-    // Send response to user
-    await sendMessage(waId, next_message);
-    console.log(`Assistant: ${next_message}`);
+    // Check if stage should advance
+    const advancement = shouldAdvanceStage(session);
+    if (advancement.shouldAdvance && advancement.nextStage) {
+      console.log(`📈 Stage advancing: ${session.stage} → ${advancement.nextStage} (${advancement.reason})`);
+      session.stage = advancement.nextStage;
+      session.stage_turn_count = 0; // Reset turn counter for new stage
+    }
+
+    // Log scoring and stage info
+    console.log(`Stage: ${session.stage}, Score Δ: ${claudeResponse.score_delta}, Total: ${session.score}`);
+    if (claudeResponse.reasons && claudeResponse.reasons.length > 0) {
+      console.log(`Reasons: ${claudeResponse.reasons.join(', ')}`);
+    }
+    if (claudeResponse.risk_flags && claudeResponse.risk_flags.length > 0) {
+      console.log(`⚠️  Risk Flags: ${claudeResponse.risk_flags.join(', ')}`);
+    }
+
+    // Show score breakdown
+    const breakdown = getScoreBreakdown(session.lead_data, session.risk_flags);
+    console.log(`Score Breakdown: Identity=${breakdown.breakdown.identity_trust}, Transaction=${breakdown.breakdown.transaction_intent}, Clarity=${breakdown.breakdown.requirement_clarity}, Risk=${breakdown.breakdown.risk_deductions}`);
+
+    console.log(`Route: ${claudeResponse.route}`);
+
+    // Send response to user first
+    await sendMessage(waId, claudeResponse.next_message);
+    console.log(`Assistant: ${claudeResponse.next_message}`);
+
+    // Handle routing (async, don't block user response)
+    if (claudeResponse.route !== 'CONTINUE') {
+      console.log(`\n🎯 Executing routing: ${claudeResponse.route}`);
+      const routingResult = await executeRouting(claudeResponse.route, session, claudeResponse.handoff_summary);
+
+      if (routingResult.success) {
+        console.log(`✅ Routing completed successfully`);
+      } else {
+        console.log(`⚠️  Routing failed: ${routingResult.reason || 'unknown'}`);
+      }
+    }
     console.log('---\n');
 
   } catch (error) {

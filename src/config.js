@@ -24,6 +24,11 @@ export const config = {
     model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-5-20250929',
   },
 
+  // OpenAI Whisper
+  openai: {
+    apiKey: process.env.OPENAI_API_KEY,
+  },
+
   // WhatsApp Cloud API
   whatsapp: {
     token: process.env.WA_TOKEN,
@@ -36,5 +41,11 @@ export const config = {
   server: {
     port: process.env.PORT || 3000,
     nodeEnv: process.env.NODE_ENV || 'development',
+  },
+
+  // n8n Webhooks (optional)
+  n8n: {
+    webhookHumanNow: process.env.N8N_WEBHOOK_HUMAN_NOW || '',
+    webhookNurture: process.env.N8N_WEBHOOK_NURTURE || '',
   },
 };

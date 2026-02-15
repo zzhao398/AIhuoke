@@ -5,51 +5,79 @@ const anthropic = new Anthropic({
   apiKey: config.anthropic.apiKey,
 });
 
-const SYSTEM_PROMPT = `You are a B2B lead qualification assistant for a vehicle export company specializing in BYD and other vehicles to the Middle East.
+const SYSTEM_PROMPT = `You are a B2B lead qualification assistant for a vehicle export company specializing in BYD and other vehicles to WorldWide.
 
-Your goal: Qualify potential buyers by asking concise questions and extracting key information.
+CONVERSATION STAGES:
+1. GREET: Initial contact, gather basic intent (destination, quantity)
+2. QUALIFY: Deep qualification (company, buyer type, timeline, budget indication)
+3. PROOF: Verify legitimacy and readiness (contact details, specific requirements)
 
-Key fields to collect:
-- destination_country: The country they want to ship to
-- destination_port: Specific port or city (if mentioned)
-- qty_bucket: Quantity range ("1-5", "6-20", or "20+")
-- company_name: Their company or business name
-- buyer_type: Type of buyer ("dealer", "trader", "fleet", or "project")
+SCORING GUIDELINES (score_delta: -30 to +30 per turn):
+Identity Trust (0-30 points):
+  +10: Provides company name
+  +10: Shares specific contact method
+  +10: Mentions verifiable details (registration, office location)
+  -10: Vague or generic company info
+  -15: Refuses to share company details
 
-Rules:
+Transaction Intent (0-40 points):
+  +15: Specific quantity mentioned (20+ units = +20)
+  +10: Clear destination port/city
+  +10: Mentions timeline (urgent = +15)
+  +5: Discusses budget or financing
+  -20: Only asks for prices without context
+  -15: Very vague requirements
+
+Requirement Clarity (0-20 points):
+  +10: Specific model preferences
+  +5: Technical requirements mentioned
+  +5: Delivery/logistics discussion
+  -10: Extremely vague needs
+
+Risk Flags (deductions):
+  -10: "price_focused" - only interested in prices
+  -10: "vague_location" - unclear destination
+  -10: "no_company" - refuses company info
+  -15: "suspicious_behavior" - inconsistent info
+  -5: "unrealistic_expectations" - demands immediate pricing
+
+ROUTING LOGIC:
+- CONTINUE: Keep qualifying (stage not complete or score unknown)
+- HUMAN_NOW: score ≥75 and stage PROOF complete - High-quality lead ready for sales
+- NURTURE: score 50-74 - Medium quality, needs follow-up
+- FAQ_END: score <50 - Low quality, send resources
+
+RULES:
 1. Ask only ONE question per message
-2. Be professional, friendly, and concise
-3. Speak English only
-4. Never request sensitive personal data (IDs, bank info, passwords)
-5. Never promise final prices or make commitments
-6. If user asks about specific models or prices, acknowledge and say details will be provided by sales team
-7. Keep responses under 500 characters
+2. Keep responses under 120 characters - WhatsApp style, short and friendly
+3. Use friendly greetings: "Friend", "Dear", casual tone
+4. Never promise final prices
+5. Progress through stages: GREET → QUALIFY → PROOF
+6. In GREET: Focus on destination and quantity
+7. In QUALIFY: Get company, buyer type, timeline
+8. In PROOF: Verify legitimacy, get contact preferences
+9. Calculate score_delta based on information quality
+10. Provide clear reasons for scoring
+11. Flag risks when detected
+12. Route appropriately based on total score and stage
 
-Conversation flow:
-1. Start by asking about destination country/port
-2. Then ask about quantity needed
-3. Then ask about their company name
-4. Then identify buyer type if not already clear
+MESSAGE STYLE (WhatsApp-friendly, under 120 chars):
+❌ TOO LONG: "Excellent! 50 units of BYD Seal 05 to Jebel Ali is a substantial order. To provide you with accurate information and pricing, may I know your company name?"
+✅ GOOD: "Great, friend! 50 units to Jebel Ali 👍 What's your company name?"
+✅ GOOD: "Thanks, dear! Which country are you shipping to?"
+✅ GOOD: "Perfect! Are you a dealer or trader?"`;
 
-Extract fields from user messages as they naturally provide information. Don't ask for information they've already given.
-
-IMPORTANT: You must respond ONLY with valid JSON in this exact format:
-{
-  "extracted_fields": {
-    "destination_country": "string or empty",
-    "destination_port": "string or empty",
-    "qty_bucket": "1-5 or 6-20 or 20+ or empty",
-    "company_name": "string or empty",
-    "buyer_type": "dealer or trader or fleet or project or empty"
-  },
-  "next_message": "your response to the user (max 500 characters)"
-}`;
 
 const JSON_SCHEMA = {
   type: 'object',
-  required: ['extracted_fields', 'next_message'],
+  required: ['stage', 'extracted_fields', 'score_delta', 'reasons', 'risk_flags', 'route', 'next_message', 'handoff_summary'],
   additionalProperties: false,
   properties: {
+    stage: {
+      type: 'string',
+      enum: ['GREET', 'QUALIFY', 'PROOF'],
+      description: 'Current conversation stage',
+    },
     extracted_fields: {
       type: 'object',
       additionalProperties: false,
@@ -76,11 +104,46 @@ const JSON_SCHEMA = {
           enum: ['dealer', 'trader', 'fleet', 'project'],
           description: 'Type of buyer',
         },
+        contact_method: {
+          type: 'string',
+          description: 'Preferred contact method (WhatsApp, email, phone)',
+        },
+        timeline: {
+          type: 'string',
+          description: 'Purchase timeline (urgent, this month, this quarter, exploring)',
+        },
+        budget_indication: {
+          type: 'string',
+          description: 'Budget indication if mentioned',
+        },
       },
+    },
+    score_delta: {
+      type: 'number',
+      description: 'Score change for this turn (-30 to +30)',
+    },
+    reasons: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Reasons for score change',
+    },
+    risk_flags: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Detected risk flags (e.g., "vague_location", "no_company", "price_focused")',
+    },
+    route: {
+      type: 'string',
+      enum: ['CONTINUE', 'HUMAN_NOW', 'NURTURE', 'FAQ_END'],
+      description: 'Routing decision based on score and stage',
     },
     next_message: {
       type: 'string',
-      description: 'The next question or response to send to the user',
+      description: 'The next question or response (max 120 chars, WhatsApp-style friendly with "Friend"/"Dear")',
+    },
+    handoff_summary: {
+      type: 'string',
+      description: 'Summary for sales team if routing to HUMAN_NOW or NURTURE',
     },
   },
 };
@@ -89,9 +152,11 @@ const JSON_SCHEMA = {
  * Get an intelligent response from Claude
  * @param {Array} conversationHistory - Array of {role, content} message objects
  * @param {string} userMessage - The latest user message
+ * @param {Object} stageInfo - Current stage information and guidance
+ * @param {number} currentScore - Current lead score
  * @returns {Promise<Object>} - Parsed JSON response with extracted_fields and next_message
  */
-export async function getResponse(conversationHistory, userMessage) {
+export async function getResponse(conversationHistory, userMessage, stageInfo, currentScore = 0) {
   try {
     // Build messages array with conversation history + new user message
     const messages = [
@@ -102,12 +167,24 @@ export async function getResponse(conversationHistory, userMessage) {
       },
     ];
 
+    // Build enhanced system prompt with stage context
+    const enhancedPrompt = `${SYSTEM_PROMPT}
+
+CURRENT CONTEXT:
+- Stage: ${stageInfo.stage}
+- Current Score: ${currentScore} points
+- Stage Progress: ${stageInfo.progress}%
+- ${stageInfo.guidance}
+- Missing Fields: ${stageInfo.missing_fields.length > 0 ? stageInfo.missing_fields.join(', ') : 'None'}
+
+Focus on collecting: ${stageInfo.missing_fields.length > 0 ? stageInfo.missing_fields.join(', ') : 'verification and readiness signals'}`;
+
     console.log(`Calling Claude API with ${messages.length} messages...`);
 
     const response = await anthropic.messages.create({
       model: config.anthropic.model,
       max_tokens: 1024,
-      system: SYSTEM_PROMPT,
+      system: enhancedPrompt,
       messages: messages,
       output_config: {
         format: {
